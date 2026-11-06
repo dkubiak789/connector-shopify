@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 from odoo import fields, models
 from odoo.exceptions import UserError
 from odoo.fields import Command
-from odoo.tools import float_compare, float_is_zero, float_round
 
 from odoo.addons.queue_job.exception import RetryableJobError
 
@@ -108,7 +107,7 @@ class ShopifyOrderFulfillmentSync(models.Model):
         return True
 
     def _job_refresh_fulfillment_orders(self):
-        self = self.sudo()
+        self = self.sudo()  # noqa: PLW0642
         self.ensure_one()
         if not self.instance_id.active or self.is_draft:
             return []
@@ -463,7 +462,7 @@ class ShopifyOrderFulfillmentSync(models.Model):
             )
 
     def _push_picking_fulfillment(self, picking_id):  # noqa: C901
-        self = self.sudo()
+        self = self.sudo()  # noqa: PLW0642
         self.ensure_one()
         if not self.instance_id.active:
             return False
@@ -875,7 +874,7 @@ class ShopifyFulfillmentOrderActions(models.Model):
     _inherit = "shopify.fulfillment.order"
 
     def _job_release_hold(self):
-        self = self.sudo()
+        self = self.sudo()  # noqa: PLW0642
         self.ensure_one()
         if not self.instance_id.active:
             return False
@@ -994,7 +993,7 @@ class ShopifyFulfillmentActions(models.Model):
         return True
 
     def _job_cancel_shopify(self):
-        self = self.sudo()
+        self = self.sudo()  # noqa: PLW0642
         self.ensure_one()
         if not self.instance_id.active:
             return False
@@ -1102,7 +1101,7 @@ class StockPickingShopifyFulfillmentSync(models.Model):
             fulfillments = picking.sudo().shopify_fulfillment_ids.filtered("shopify_id")
             for fulfillment in fulfillments:
                 base_url = (
-                    self.env["ir.config_parameter"].sudo().get_param("web.base.url")
+                    self.env["ir.config_parameter"].sudo().get_str("web.base.url")
                 )
                 link = (
                     f"{(base_url or '').rstrip('/')}/web#id={fulfillment.id}"
@@ -1163,7 +1162,7 @@ class ShopifyExternalFulfillmentImport(models.Model):
     def _job_import_from_shopify(
         self, instance_id, fulfillment_id, webhook_payload=None
     ):
-        self = self.sudo()
+        self = self.sudo()  # noqa: PLW0642
         instance = self.env["shopify.instance"].browse(instance_id).exists()
         if not instance or not instance.active:
             return False
@@ -1486,7 +1485,7 @@ class ShopifyExternalFulfillmentImport(models.Model):
 
     def _external_line_needs(self, sale_line, quantity):
         ordered = sale_line.product_uom_qty
-        if float_is_zero(ordered, precision_rounding=sale_line.product_uom_id.rounding):
+        if sale_line.product_uom_id.is_zero(ordered):
             return {}
         moves = self._external_chain_moves(sale_line)
         # The first step holds the whole quantity of each product, even once
@@ -1499,10 +1498,7 @@ class ShopifyExternalFulfillmentImport(models.Model):
                     lambda move, product=product: move.product_id == product
                 ).mapped("product_qty")
             )
-            needs[product] = float_round(
-                quantity * total / ordered,
-                precision_rounding=product.uom_id.rounding,
-            )
+            needs[product] = product.uom_id.round(quantity * total / ordered)
         return needs
 
     def _external_chain_moves(self, sale_lines):
@@ -1517,7 +1513,7 @@ class ShopifyExternalFulfillmentImport(models.Model):
                     move.picking_code == "outgoing"
                     or (
                         move.picking_code == "internal"
-                        and move.location_final_id.usage == "customer"
+                        and move.forecasted_location_id.usage == "customer"
                     )
                 )
             )
@@ -1537,14 +1533,14 @@ class ShopifyExternalFulfillmentImport(models.Model):
             return (
                 not advanced,
                 not at_location,
-                move.picking_id.scheduled_date or datetime.max,
+                move.picking_id.scheduled_date or datetime.max,  # noqa: DTZ901
                 move.picking_id.id,
                 move.id,
             )
 
         allocation = {}
         for (sale_line, product), quantity in needed.items():
-            rounding = product.uom_id.rounding
+            uom = product.uom_id
             moves = (
                 self._external_chain_moves(sale_line)
                 .filtered(
@@ -1558,14 +1554,12 @@ class ShopifyExternalFulfillmentImport(models.Model):
                 .sorted(sort_key)
             )
             for move in moves:
-                if float_compare(quantity, 0, precision_rounding=rounding) <= 0:
+                if uom.compare(quantity, 0) <= 0:
                     break
                 taken = min(quantity, move.product_qty - allocation.get(move, 0.0))
-                if float_compare(taken, 0, precision_rounding=rounding) > 0:
+                if uom.compare(taken, 0) > 0:
                     allocation[move] = allocation.get(move, 0.0) + taken
-                    quantity = float_round(
-                        quantity - taken, precision_rounding=rounding
-                    )
+                    quantity = uom.round(quantity - taken)
         return allocation
 
     def _external_missing(self, needed, allocation):
@@ -1578,10 +1572,8 @@ class ShopifyExternalFulfillmentImport(models.Model):
                 for move, allocated in allocation.items()
                 if move.sale_line_id == sale_line and move.product_id == product
             )
-            rest = float_round(
-                quantity - covered, precision_rounding=product.uom_id.rounding
-            )
-            if float_compare(rest, 0, precision_rounding=product.uom_id.rounding) > 0:
+            rest = product.uom_id.round(quantity - covered)
+            if product.uom_id.compare(rest, 0) > 0:
                 missing[(sale_line, product)] = rest
         return missing
 
@@ -1589,7 +1581,7 @@ class ShopifyExternalFulfillmentImport(models.Model):
         return self.env["stock.move"].browse([move.id for move in allocation])
 
     def _external_reserved_quantity(self, move):
-        return move.product_uom._compute_quantity(move.quantity, move.product_id.uom_id)
+        return move.uom_id._compute_quantity(move.quantity, move.product_id.uom_id)
 
     def _ship_external_moves(self, allocation):
         pickings = self._external_moves(allocation).picking_id
@@ -1599,10 +1591,8 @@ class ShopifyExternalFulfillmentImport(models.Model):
         if not self.instance_id.fulfillment_validate_unreserved:
             for move, quantity in allocation.items():
                 if (
-                    float_compare(
-                        self._external_reserved_quantity(move),
-                        quantity,
-                        precision_rounding=move.product_id.uom_id.rounding,
+                    move.product_id.uom_id.compare(
+                        self._external_reserved_quantity(move), quantity
                     )
                     < 0
                 ):
@@ -1623,7 +1613,7 @@ class ShopifyExternalFulfillmentImport(models.Model):
             quantity = allocation.get(move)
             if quantity:
                 move.quantity = move.product_id.uom_id._compute_quantity(
-                    quantity, move.product_uom
+                    quantity, move.uom_id
                 )
                 move.picked = True
             else:
